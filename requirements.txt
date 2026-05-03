@@ -1,6 +1,19 @@
-opencv-python==4.10.0.84
-ultralytics==8.3.0
-supabase==2.10.0
+# Core vision & AI
+opencv-python>=4.8
+ultralytics>=8.0
 numpy<2.0.0
-python-dotenv==1.0.1
-PyYAML==6.0.2
+
+# Face recognition
+# DeepFace supports multiple backends. SFace (default) uses OpenCV DNN — no
+# TensorFlow needed. For higher accuracy switch FACE_MODEL to Facenet512 or
+# ArcFace and uncomment the tensorflow line below.
+deepface>=0.0.93
+# tensorflow>=2.12          # needed for Facenet512 / ArcFace / VGG-Face
+# tf-keras                   # compatibility shim for TF 2.16+
+
+# Supabase
+supabase>=2.0
+
+# Utilities
+python-dotenv
+PyYAML

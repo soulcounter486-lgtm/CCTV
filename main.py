@@ -1,131 +1,260 @@
+"""
+main.py — Kitchen Activity Monitor with YOLOv8 person detection + DeepFace recognition.
+
+Pipeline (per frame):
+    RTSP frame → YOLOv8 track() → per-person:
+        · Crop face region (top 40% of bbox)
+        · DeepFace identify (async thread, every FACE_DET_INTERVAL frames)
+        · Check which zone the person centre is in
+        · Accumulate motion score
+    Every AGGREGATION_SECONDS → flush per-(zone, employee) averages → Supabase INSERT
+"""
 from __future__ import annotations
 
+import sys
 import time
+import threading
+from collections import defaultdict
+from pathlib import Path
+from typing import NamedTuple
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from supabase import create_client
 
-from config import load_config
-from kitchen_activity.rtsp import RtspConfig
-from kitchen_activity.rtsp import RtspStream
-from kitchen_activity.supabase_sink import SupabaseConfig
-from kitchen_activity.supabase_sink import SupabaseSink
-from kitchen_activity.zones import load_zones
-
-
-def _mask_from_polygon(w: int, h: int, poly_xy: np.ndarray) -> np.ndarray:
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cv2.fillPoly(mask, [poly_xy], 255)
-    return mask
+from kitchen_activity.config import load_config
+from kitchen_activity.rtsp import RtspConfig, RtspStream
+from kitchen_activity.zones import load_zones, point_in_polygon
+from kitchen_activity import face_encoder
 
 
-def _mean_absdiff_in_mask(prev_gray: np.ndarray, gray: np.ndarray, mask: np.ndarray) -> float:
-    diff = cv2.absdiff(prev_gray, gray)
-    # diff is uint8 [0..255], mean over mask area
-    mean_val = cv2.mean(diff, mask=mask)[0]
-    return float(mean_val)
+# ── Types ─────────────────────────────────────────────────────────────────────
 
+class BucketKey(NamedTuple):
+    zone_name: str
+    employee_name: str
+
+
+# ── Face recognition helper ───────────────────────────────────────────────────
+
+class AsyncFaceRecognizer:
+    """
+    Background-thread face recognizer with per-track-id result caching.
+
+    Why async: DeepFace.find() can take 200 ms–1 s per call. Running it
+    synchronously would drop frames. Instead we submit crops to a worker thread
+    and use the cached result from the previous recognition cycle.
+    """
+
+    def __init__(self, faces_db: str, model_name: str, threshold: float, interval: int) -> None:
+        self._faces_db = faces_db
+        self._model_name = model_name
+        self._threshold = threshold
+        self._interval = interval          # frames between re-runs per track id
+
+        self._cache: dict[int, str] = {}   # track_id → name
+        self._last_run: dict[int, int] = {}
+        self._pending: dict[int, np.ndarray] = {}
+        self._lock = threading.Lock()
+
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+
+    def due(self, track_id: int, frame_idx: int) -> bool:
+        return frame_idx - self._last_run.get(track_id, -self._interval) >= self._interval
+
+    def submit(self, track_id: int, crop: np.ndarray, frame_idx: int) -> None:
+        with self._lock:
+            self._pending[track_id] = crop.copy()
+            self._last_run[track_id] = frame_idx
+
+    def get(self, track_id: int) -> str:
+        with self._lock:
+            return self._cache.get(track_id, "unknown")
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                batch = dict(self._pending)
+                self._pending.clear()
+            for tid, crop in batch.items():
+                name = face_encoder.recognize(crop, self._faces_db, self._model_name, self._threshold)
+                with self._lock:
+                    self._cache[tid] = name
+                    print(f"  [Face] track={tid} → {name}")
+            time.sleep(0.05)
+
+
+# ── Aggregator ────────────────────────────────────────────────────────────────
+
+class Aggregator:
+    """Accumulates motion scores per (zone, employee) and flushes every window_sec."""
+
+    def __init__(self, window_sec: int, global_threshold: float) -> None:
+        self._window = window_sec
+        self._global_thr = global_threshold
+        self._start = time.time()
+        # key → {'sum': float, 'n': int, 'threshold': float}
+        self._data: dict[BucketKey, dict] = defaultdict(lambda: {"sum": 0.0, "n": 0, "threshold": self._global_thr})
+
+    def add(self, zone_name: str, employee: str, motion: float, zone_threshold: float | None = None) -> None:
+        key = BucketKey(zone_name, employee)
+        bucket = self._data[key]
+        bucket["sum"] += motion
+        bucket["n"] += 1
+        if zone_threshold is not None:
+            bucket["threshold"] = zone_threshold
+
+    def ready(self) -> bool:
+        return time.time() - self._start >= self._window
+
+    def flush(self) -> list[dict]:
+        records = []
+        for key, v in self._data.items():
+            avg = v["sum"] / v["n"] if v["n"] > 0 else 0.0
+            records.append({
+                "zone_name": key.zone_name,
+                "employee_name": key.employee_name,
+                "is_active": avg >= v["threshold"],
+                "motion_score": round(avg, 2),
+            })
+        self._data.clear()
+        self._start = time.time()
+        return records
+
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+def crop_face(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, ratio: float = 0.45) -> np.ndarray:
+    """Return the top *ratio* portion of the bounding box as a face crop."""
+    fh, fw = frame.shape[:2]
+    pad_x = int((x2 - x1) * 0.08)
+    fy2 = min(fh, y1 + int((y2 - y1) * ratio))
+    fx1 = max(0, x1 - pad_x)
+    fx2 = min(fw, x2 + pad_x)
+    return frame[y1:fy2, fx1:fx2]
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    c = load_config()
-    if not c.rtsp_url:
-        raise ValueError("RTSP_URL is empty in .env")
+    cfg = load_config()
 
-    model = YOLO(c.yolo_model)
-    sink = SupabaseSink(SupabaseConfig(url=c.supabase_url, key=c.supabase_key, table=c.supabase_table))
+    if not cfg.rtsp_url:
+        sys.exit("[ERROR] RTSP_URL is not set in .env")
+    if not cfg.supabase_url or not cfg.supabase_key:
+        sys.exit("[ERROR] SUPABASE_URL / SUPABASE_KEY not set in .env")
 
-    stream = RtspStream(
-        RtspConfig(
-            url=c.rtsp_url,
-            reconnect_backoff_seconds=c.reconnect_backoff_seconds,
-            rtsp_transport=c.rtsp_transport,
-            ffmpeg_read_timeout_ms=c.rtsp_read_timeout_ms,
-        )
+    # ── Supabase client ───────────────────────────────────────────────────────
+    sb = create_client(cfg.supabase_url, cfg.supabase_key)
+
+    # ── Zones ─────────────────────────────────────────────────────────────────
+    zones = load_zones(cfg.zones_config_path)
+    print(f"Loaded {len(zones)} zone(s): {[z.name for z in zones]}")
+
+    # ── YOLO ──────────────────────────────────────────────────────────────────
+    model = YOLO(cfg.yolo_model)
+    print(f"YOLO model: {cfg.yolo_model}")
+
+    # ── Face DB ───────────────────────────────────────────────────────────────
+    Path(cfg.faces_db).mkdir(exist_ok=True)
+    face_recog = AsyncFaceRecognizer(
+        cfg.faces_db, cfg.face_model, cfg.face_distance_threshold, cfg.face_det_interval
     )
+    employees = face_encoder.list_employees(cfg.faces_db)
+    print(f"Faces DB '{cfg.faces_db}': {len(employees)} employee(s) registered")
 
-    zones = load_zones(c.zones_config_path)
-    zone_names = [z.name for z in zones]
-    zone_thresholds: dict[str, float] = {
-        z.name: (z.motion_active_threshold if z.motion_active_threshold is not None else c.motion_active_threshold)
-        for z in zones
-    }
+    # ── RTSP stream ───────────────────────────────────────────────────────────
+    rtsp_cfg = RtspConfig(
+        url=cfg.rtsp_url,
+        rtsp_transport=cfg.rtsp_transport,
+        ffmpeg_read_timeout_ms=cfg.rtsp_timeout_ms,
+        reconnect_backoff_seconds=cfg.reconnect_backoff_seconds,
+    )
+    stream = RtspStream(rtsp_cfg)
 
-    window_start = time.time()
-    motion_sum_by_zone: dict[str, float] = {zn: 0.0 for zn in zone_names}
-    motion_samples_by_zone: dict[str, int] = {zn: 0 for zn in zone_names}
+    # ── Aggregator ────────────────────────────────────────────────────────────
+    agg = Aggregator(cfg.aggregation_seconds, cfg.motion_active_threshold)
 
-    prev_gray = None
-    zone_masks: dict[str, np.ndarray] | None = None
+    # Motion tracking per track-id: last centre (normalised 0–1)
+    prev_centres: dict[int, tuple[float, float]] = {}
+    frame_idx = 0
 
-    try:
-        for _, frame in stream.frames():
-            h, w = frame.shape[:2]
-            if zone_masks is None:
-                zone_masks = {}
-                for z in zones:
-                    poly_xy = np.array(z.polygon, dtype=np.int32)
-                    zone_masks[z.name] = _mask_from_polygon(w, h, poly_xy)
+    print("Monitoring started. Press Ctrl+C to stop.")
 
-            # YOLO person detection (COCO person class=0)
-            results = model.predict(
-                source=frame,
-                device=c.device,
-                conf=c.conf_thres,
-                iou=c.iou_thres,
+    for _ts, frame in stream.frames():
+        frame_idx += 1
+        h, w = frame.shape[:2]
+
+        # ── YOLO track ────────────────────────────────────────────────────────
+        try:
+            results = model.track(
+                frame,
+                persist=True,
+                conf=cfg.conf_thres,
+                iou=cfg.iou_thres,
+                classes=[0],   # person only
                 verbose=False,
             )
-            r0 = results[0] if results else None
+        except Exception as exc:
+            print(f"[YOLO] {exc}")
+            continue
 
-            # Build a dynamic mask = ROI polygon AND union of person bboxes
-            # (movement score only counts where a person exists inside ROI)
-            person_mask = np.zeros((h, w), dtype=np.uint8)
-            if r0 is not None and r0.boxes is not None and len(r0.boxes) > 0:
-                cls = r0.boxes.cls.detach().cpu().numpy().astype(int)
-                xyxy = r0.boxes.xyxy.detach().cpu().numpy().astype(int)
-                for c_id, bb in zip(cls, xyxy):
-                    if int(c_id) != 0:
-                        continue
-                    x1, y1, x2, y2 = int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
-                    x1 = max(0, min(w - 1, x1))
-                    x2 = max(0, min(w - 1, x2))
-                    y1 = max(0, min(h - 1, y1))
-                    y2 = max(0, min(h - 1, y2))
-                    if x2 <= x1 or y2 <= y1:
-                        continue
-                    person_mask[y1:y2, x1:x2] = 255
+        if not results or results[0].boxes is None:
+            if agg.ready():
+                _flush(agg, sb, cfg.supabase_table)
+            continue
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        for box in results[0].boxes:
+            if box.id is None:
+                continue
 
-            if prev_gray is not None:
-                assert zone_masks is not None
-                for zone_name, zone_mask in zone_masks.items():
-                    motion_mask = cv2.bitwise_and(zone_mask, person_mask)
+            tid = int(box.id.item())
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-                    if cv2.countNonZero(motion_mask) > 0:
-                        score = _mean_absdiff_in_mask(prev_gray, gray, motion_mask)
-                        motion_sum_by_zone[zone_name] = motion_sum_by_zone.get(zone_name, 0.0) + float(score)
-                        motion_samples_by_zone[zone_name] = motion_samples_by_zone.get(zone_name, 0) + 1
+            # Normalised centre
+            cx = (x1 + x2) / 2.0 / w
+            cy = (y1 + y2) / 2.0 / h
 
-            prev_gray = gray
+            # ── Motion score (Euclidean pixel displacement of centre) ─────────
+            prev = prev_centres.get(tid)
+            if prev is not None:
+                motion = float(np.hypot((cx - prev[0]) * w, (cy - prev[1]) * h))
+            else:
+                motion = 0.0
+            prev_centres[tid] = (cx, cy)
 
-            now = time.time()
-            if now - window_start >= c.aggregation_seconds:
-                for zone_name in zone_names:
-                    samples = motion_samples_by_zone.get(zone_name, 0)
-                    total = motion_sum_by_zone.get(zone_name, 0.0)
-                    mean_motion = (total / samples) if samples > 0 else 0.0
-                    # If no person was seen in this zone during the window, treat as idle.
-                    thr = zone_thresholds.get(zone_name, c.motion_active_threshold)
-                    is_active = (samples > 0) and (mean_motion >= thr)
-                    sink.insert_activity(zone_name=zone_name, is_active=is_active, motion_score=mean_motion)
+            # ── Face recognition (async) ──────────────────────────────────────
+            if face_recog.due(tid, frame_idx):
+                face_crop = crop_face(frame, x1, y1, x2, y2)
+                if face_crop.size > 0:
+                    face_recog.submit(tid, face_crop, frame_idx)
 
-                window_start = now
-                motion_sum_by_zone = {zn: 0.0 for zn in zone_names}
-                motion_samples_by_zone = {zn: 0 for zn in zone_names}
-    finally:
-        stream.close()
+            employee = face_recog.get(tid)
+
+            # ── Zone check ────────────────────────────────────────────────────
+            px, py = int(cx * w), int(cy * h)
+            for zone in zones:
+                if point_in_polygon((px, py), zone.polygon):
+                    agg.add(zone.name, employee, motion, zone.motion_active_threshold)
+
+        # ── Flush aggregation window ──────────────────────────────────────────
+        if agg.ready():
+            _flush(agg, sb, cfg.supabase_table)
+
+
+def _flush(agg: Aggregator, sb, table: str) -> None:
+    records = agg.flush()
+    if not records:
+        return
+    try:
+        sb.table(table).insert(records).execute()
+        for r in records:
+            status = "Active" if r["is_active"] else "Idle"
+            print(f"  [INSERT] {r['zone_name']} / {r['employee_name']} → {status} (motion={r['motion_score']})")
+    except Exception as exc:
+        print(f"[Supabase INSERT error] {exc}")
 
 
 if __name__ == "__main__":

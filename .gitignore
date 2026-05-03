@@ -18,6 +18,13 @@ dashboard/.env.local.*
 *.onnx
 *.engine
 
+# Face DB — keep folder structure but not actual photos or DeepFace cache
+faces_db/**/*.jpg
+faces_db/**/*.jpeg
+faces_db/**/*.png
+faces_db/**/*.webp
+faces_db/**/representations_*.pkl
+
 # Node / Next
 node_modules/
 npm-debug.log*

@@ -44,6 +44,13 @@ export function ControlBar({
             <span className="hidden text-sm text-zinc-500 sm:inline">{email}</span>
           ) : null}
 
+          <a
+            href="/faces"
+            className="rounded-2xl border bg-white px-3 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-50"
+          >
+            직원 관리
+          </a>
+
           {onLogout ? (
             <button
               onClick={onLogout}
