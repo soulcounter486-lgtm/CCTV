@@ -37,6 +37,7 @@ export default function KitchenDashboardPage() {
   const [day, setDay] = useState(todayStr);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
   const [rawRows, setRawRows] = useState<KitchenActivityRow[]>([]);
 
@@ -54,6 +55,7 @@ export default function KitchenDashboardPage() {
       router.replace(`/login?next=${encodeURIComponent("/dashboard")}`);
       return;
     }
+    setUserEmail(sess.session.user.email ?? null);
 
     const { startIso, endIso } = localDayRangeIso(dayStr);
     const { data, error: qErr } = await supabase
@@ -149,6 +151,11 @@ export default function KitchenDashboardPage() {
     return base;
   }, [samples]);
 
+  async function logout() {
+    await supabase.auth.signOut();
+    router.replace("/login");
+  }
+
   const kitchenStill =
     "https://images.unsplash.com/photo-1556910103-1c02745aae4d?q=80&w=1600&auto=format&fit=crop";
 
@@ -156,10 +163,12 @@ export default function KitchenDashboardPage() {
     <div className="min-h-screen bg-zinc-50">
       <ControlBar
         title="주방 활동 관리 대시보드"
-        subtitle={"Supabase의 kitchen_activity 데이터를 기반으로 표시합니다."}
+        subtitle="Supabase kitchen_activity 실시간 데이터 기반"
         value={day}
         onChange={setDay}
         idleThreshold={IDLE_THRESHOLD}
+        email={userEmail}
+        onLogout={logout}
       />
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6">
