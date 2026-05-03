@@ -27,12 +27,12 @@ export function ActivityChart({
   idleThreshold: number;
 }) {
   const data = samples.map((s) => {
-    return {
-      t: s.t,
-      prep: Math.round(s.zones.prep.motion * 10) / 10,
-      stove: Math.round(s.zones.stove.motion * 10) / 10,
-      pack: Math.round(s.zones.pack.motion * 10) / 10,
-    };
+    const row: Record<string, number | string> = { t: s.t };
+    for (const z of zones) {
+      const m = s.zones[z.id]?.motion ?? 0;
+      row[z.id] = Math.round(m * 10) / 10;
+    }
+    return row;
   });
 
   const tickTs =
@@ -49,7 +49,7 @@ export function ActivityChart({
         <div>
           <div className="text-sm font-semibold text-zinc-950">시간대별 활동 흐름</div>
           <div className="text-xs text-zinc-600">
-            붉은 배경은 <span className="font-medium text-zinc-950">전 구역 Idle</span> 구간(더미 규칙)
+            붉은 배경은 <span className="font-medium text-zinc-950">전 구역 Idle</span> 구간
           </div>
         </div>
         <div className="text-xs text-zinc-600">

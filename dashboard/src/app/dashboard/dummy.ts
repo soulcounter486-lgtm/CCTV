@@ -1,4 +1,4 @@
-export type ZoneKey = "prep" | "stove" | "pack";
+export type ZoneKey = string;
 
 export type ZoneDef = {
   id: ZoneKey;
@@ -11,7 +11,7 @@ export type ZoneDef = {
 export type MinuteSample = {
   t: number; // epoch ms
   zones: Record<
-    ZoneKey,
+    string,
     {
       motion: number;
       active: boolean;
@@ -20,41 +20,31 @@ export type MinuteSample = {
   >;
 };
 
+// NOTE: polygonPct is an approximation based on `config/zones.yaml` pixel polygons.
+// If your camera resolution differs, adjust normalization (currently assumes 1280x720).
 export const ZONE_DEFS: ZoneDef[] = [
   {
-    id: "prep",
+    id: "cooking_zone",
     labelKo: "조리대",
-    labelEn: "Prep",
+    labelEn: "Cooking",
     color: "#2563eb",
     polygonPct: [
-      [0.08, 0.62],
-      [0.42, 0.52],
-      [0.46, 0.92],
-      [0.12, 0.96],
+      [100 / 1280, 120 / 720],
+      [520 / 1280, 120 / 720],
+      [560 / 1280, 360 / 720],
+      [120 / 1280, 380 / 720],
     ],
   },
   {
-    id: "stove",
-    labelKo: "화구",
-    labelEn: "Stove",
-    color: "#ea580c",
-    polygonPct: [
-      [0.44, 0.48],
-      [0.72, 0.42],
-      [0.76, 0.82],
-      [0.48, 0.88],
-    ],
-  },
-  {
-    id: "pack",
+    id: "packing_zone",
     labelKo: "포장대",
     labelEn: "Packing",
     color: "#16a34a",
     polygonPct: [
-      [0.72, 0.46],
-      [0.94, 0.42],
-      [0.96, 0.88],
-      [0.76, 0.86],
+      [600 / 1280, 140 / 720],
+      [980 / 1280, 140 / 720],
+      [980 / 1280, 520 / 720],
+      [610 / 1280, 520 / 720],
     ],
   },
 ];
@@ -87,7 +77,6 @@ export function buildDummyDaySamples(day: Date): MinuteSample[] {
     const noise = (k: number) => (pseudoRand(t + k * 9973) - 0.5) * 6;
 
     const prepMotion = clamp(base * 0.9 + noise(1), 0, 80);
-    const stoveMotion = clamp(base * 1.05 + noise(2) + (hour > 17 ? 6 : 0), 0, 90);
     const packMotion = clamp(base * 0.75 + noise(3) + (hour > 18 ? 8 : 0), 0, 85);
 
     // Inject idle plateaus (global-ish drop)
@@ -95,9 +84,8 @@ export function buildDummyDaySamples(day: Date): MinuteSample[] {
     const globalIdle = lunch < 0.12 && hour < 11.5 ? -18 : idleWave;
 
     const motions = {
-      prep: clamp(prepMotion + globalIdle, 0, 100),
-      stove: clamp(stoveMotion + globalIdle * 0.9, 0, 100),
-      pack: clamp(packMotion + globalIdle * 0.85, 0, 100),
+      cooking_zone: clamp(prepMotion + globalIdle, 0, 100),
+      packing_zone: clamp(packMotion + globalIdle * 0.85, 0, 100),
     };
 
     const toPerson = (m: number) => clamp(Math.round(m / 14 + (pseudoRand(t + m) - 0.45) * 2), 0, 4);
@@ -105,20 +93,15 @@ export function buildDummyDaySamples(day: Date): MinuteSample[] {
     samples.push({
       t,
       zones: {
-        prep: {
-          motion: motions.prep,
-          active: motions.prep >= IDLE_THRESHOLD,
-          personCount: toPerson(motions.prep),
+        cooking_zone: {
+          motion: motions.cooking_zone,
+          active: motions.cooking_zone >= IDLE_THRESHOLD,
+          personCount: toPerson(motions.cooking_zone),
         },
-        stove: {
-          motion: motions.stove,
-          active: motions.stove >= IDLE_THRESHOLD,
-          personCount: toPerson(motions.stove),
-        },
-        pack: {
-          motion: motions.pack,
-          active: motions.pack >= IDLE_THRESHOLD,
-          personCount: toPerson(motions.pack),
+        packing_zone: {
+          motion: motions.packing_zone,
+          active: motions.packing_zone >= IDLE_THRESHOLD,
+          personCount: toPerson(motions.packing_zone),
         },
       },
     });
@@ -130,7 +113,7 @@ export function buildDummyDaySamples(day: Date): MinuteSample[] {
 export function summarize(samples: MinuteSample[]) {
   let workMin = 0;
   let idleMin = 0;
-  const zoneAvg: Record<ZoneKey, number> = { prep: 0, stove: 0, pack: 0 };
+  const zoneAvg: Record<string, number> = Object.fromEntries(ZONE_DEFS.map((z) => [z.id, 0]));
 
   for (const s of samples) {
     const anyActive = ZONE_DEFS.some((z) => s.zones[z.id].active);
@@ -145,7 +128,8 @@ export function summarize(samples: MinuteSample[]) {
   const n = samples.length || 1;
   for (const z of ZONE_DEFS) zoneAvg[z.id] /= n;
 
-  const busiest = (Object.entries(zoneAvg) as [ZoneKey, number][]).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "prep";
+  const busiest =
+    (Object.entries(zoneAvg) as [string, number][]).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ZONE_DEFS[0]?.id ?? "";
   const busiestLabel = ZONE_DEFS.find((z) => z.id === busiest)?.labelKo ?? "—";
 
   return {

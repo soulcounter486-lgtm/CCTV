@@ -1,4 +1,4 @@
-import type { ZoneDef, ZoneKey } from "@/app/dashboard/dummy";
+import type { ZoneDef } from "@/app/dashboard/dummy";
 
 export function ZoneMonitor({
   zones,
@@ -6,15 +6,15 @@ export function ZoneMonitor({
   imageUrl,
 }: {
   zones: ZoneDef[];
-  live: Record<ZoneKey, { personCount: number; active: boolean; motion: number }>;
+  live: Record<string, { personCount: number; active: boolean; motion: number }>;
   imageUrl: string;
 }) {
   return (
     <div className="rounded-3xl border bg-white p-5 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-zinc-950">구역 모니터링 (더미)</div>
-          <div className="text-xs text-zinc-600">SVG로 Zone을 겹쳐서 badge를 표시합니다.</div>
+          <div className="text-sm font-semibold text-zinc-950">구역 모니터링</div>
+          <div className="text-xs text-zinc-600">SVG로 Zone을 겹쳐서 badge를 표시합니다 (정지 이미지는 플레이스홀더).</div>
         </div>
         <div className="rounded-full border bg-zinc-50 px-3 py-1 text-xs text-zinc-700">
           정지 화면 + 오버레이
@@ -53,7 +53,7 @@ export function ZoneMonitor({
           </svg>
 
           {zones.map((z) => {
-            const c = live[z.id];
+            const c = live[z.id] ?? { personCount: 0, active: false, motion: 0 };
             // anchor badge near polygon bbox center (very rough for demo)
             const xs = z.polygonPct.map((p) => p[0]);
             const ys = z.polygonPct.map((p) => p[1]);

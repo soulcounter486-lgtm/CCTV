@@ -1,5 +1,3 @@
-import type { ZoneKey } from "@/app/dashboard/dummy";
-
 export function SummaryCards({
   workHours,
   idleHours,
@@ -9,7 +7,7 @@ export function SummaryCards({
   workHours: number;
   idleHours: number;
   busiestZoneKo: string;
-  zoneAvg: Record<ZoneKey, number>;
+  zoneAvg: Record<string, number>;
 }) {
   const peakMotion = Math.max(...Object.values(zoneAvg), 1);
 
@@ -32,7 +30,7 @@ export function SummaryCards({
     {
       title: "피크 활동도",
       value: `${peakMotion.toFixed(1)}`,
-      hint: "구역 평균 중 최대값(더미)",
+      hint: "구역 평균 중 최대값",
     },
   ] as const;
 
