@@ -1,293 +1,504 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 
-type Point = [number, number];
-type ZoneEntry = { name: string; motion_active_threshold: number; polygon: Point[] };
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-const DEFAULT_POLYGON: Point[] = [
-  [100, 100],
-  [400, 100],
-  [400, 400],
-  [100, 400],
+type Pt = [number, number]; // pixel coords in video space (e.g. 1280×720)
+
+type ZoneEntry = {
+  name: string;
+  motion_active_threshold: number;
+  polygon: Pt[];
+  color: string; // UI-only, not saved to yaml
+};
+
+const ZONE_COLORS = [
+  "#2563eb", "#16a34a", "#dc2626", "#d97706",
+  "#7c3aed", "#0891b2", "#be185d", "#065f46",
 ];
 
-function PolygonEditor({
-  polygon,
-  onChange,
-}: {
-  polygon: Point[];
-  onChange: (p: Point[]) => void;
-}) {
-  function updatePoint(i: number, axis: 0 | 1, val: string) {
-    const n = parseInt(val);
-    if (Number.isNaN(n)) return;
-    const next = polygon.map((p, idx) =>
-      idx === i ? ([axis === 0 ? n : p[0], axis === 1 ? n : p[1]] as Point) : p
-    );
-    onChange(next);
-  }
-  function addPoint() {
-    onChange([...polygon, [200, 200]]);
-  }
-  function removePoint(i: number) {
-    if (polygon.length <= 3) return;
-    onChange(polygon.filter((_, idx) => idx !== i));
-  }
+const DEFAULT_ZONES: ZoneEntry[] = [
+  { name: "cooking_zone", motion_active_threshold: 18, polygon: [], color: ZONE_COLORS[0] },
+  { name: "packing_zone", motion_active_threshold: 12, polygon: [], color: ZONE_COLORS[1] },
+];
 
-  return (
-    <div className="space-y-2">
-      {polygon.map((p, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <span className="w-5 text-xs text-zinc-400">P{i + 1}</span>
-          <label className="flex items-center gap-1 text-xs text-zinc-600">
-            X
-            <input
-              type="number"
-              value={p[0]}
-              onChange={(e) => updatePoint(i, 0, e.target.value)}
-              className="w-20 rounded-lg border px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-zinc-400"
-            />
-          </label>
-          <label className="flex items-center gap-1 text-xs text-zinc-600">
-            Y
-            <input
-              type="number"
-              value={p[1]}
-              onChange={(e) => updatePoint(i, 1, e.target.value)}
-              className="w-20 rounded-lg border px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-zinc-400"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={() => removePoint(i)}
-            disabled={polygon.length <= 3}
-            className="rounded-lg border px-2 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-30"
-          >
-            ✕
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        onClick={addPoint}
-        className="mt-1 rounded-lg border px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
-      >
-        + 점 추가
-      </button>
-      <p className="text-xs text-zinc-400">단위: 픽셀 (1280×720 기준). 3개 이상 필요.</p>
-    </div>
-  );
+// ── Canvas helpers ─────────────────────────────────────────────────────────────
+
+function hexToRgba(hex: string, alpha: number) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ZonesPage() {
   const router = useRouter();
-  const [zones, setZones] = useState<ZoneEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // Zones state
+  const [zones, setZones] = useState<ZoneEntry[]>(DEFAULT_ZONES);
+  const [activeIdx, setActiveIdx] = useState(0); // which zone is being drawn
+  const [drawing, setDrawing] = useState(false);  // in polygon-draw mode
+
+  // Image
+  const [imgSrc, setImgSrc] = useState<string | null>(null);
+  const [imgNatW, setImgNatW] = useState(1280);
+  const [imgNatH, setImgNatH] = useState(720);
+
+  // Canvas
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [canvasW, setCanvasW] = useState(960);
+  const [canvasH, setCanvasH] = useState(540);
+
+  // UI state
+  const [saving, setSaving] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Auth guard
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (!data.session) router.replace("/login?next=/zones");
     });
   }, [router]);
 
-  const fetchZones = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/zones");
-      if (!res.ok) {
-        const j = (await res.json()) as { error: string };
-        setError(j.error ?? "Failed to load zones");
-        return;
-      }
-      const j = (await res.json()) as { zones: ZoneEntry[] };
-      setZones(j.zones.length ? j.zones : []);
-    } catch {
-      setError("Network error");
-    } finally {
-      setLoading(false);
-    }
+  // Scale helpers
+  const toCanvas = useCallback(
+    (vx: number, vy: number): [number, number] => [
+      (vx / imgNatW) * canvasW,
+      (vy / imgNatH) * canvasH,
+    ],
+    [imgNatW, imgNatH, canvasW, canvasH],
+  );
+  const toVideo = useCallback(
+    (cx: number, cy: number): [number, number] => [
+      Math.round((cx / canvasW) * imgNatW),
+      Math.round((cy / canvasH) * imgNatH),
+    ],
+    [imgNatW, imgNatH, canvasW, canvasH],
+  );
+
+  // Load existing zones.yaml on mount
+  useEffect(() => {
+    fetch("/api/zones")
+      .then((r) => r.json())
+      .then((j: { zones?: { name: string; motion_active_threshold: number; polygon: Pt[] }[] }) => {
+        if (j.zones && j.zones.length > 0) {
+          setZones(
+            j.zones.map((z, i) => ({
+              ...z,
+              color: ZONE_COLORS[i % ZONE_COLORS.length],
+            })),
+          );
+        }
+      })
+      .catch(() => null);
   }, []);
 
+  // Resize canvas to container
   useEffect(() => {
-    void fetchZones();
-  }, [fetchZones]);
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      const h = Math.round((w / imgNatW) * imgNatH);
+      setCanvasW(w);
+      setCanvasH(h);
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [imgNatW, imgNatH]);
+
+  // Draw canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+
+    // Background
+    if (imgSrc) {
+      const img = new Image();
+      img.src = imgSrc;
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvasW, canvasH);
+        drawZones(ctx);
+      };
+    } else {
+      ctx.fillStyle = "#1c1c1e";
+      ctx.fillRect(0, 0, canvasW, canvasH);
+      ctx.fillStyle = "#555";
+      ctx.font = "14px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("사진을 업로드하거나 RTSP 스냅샷을 불러오세요", canvasW / 2, canvasH / 2);
+      drawZones(ctx);
+    }
+
+    function drawZones(ctx: CanvasRenderingContext2D) {
+      zones.forEach((z, i) => {
+        if (z.polygon.length < 1) return;
+        const pts = z.polygon.map(([vx, vy]) => toCanvas(vx, vy));
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let j = 1; j < pts.length; j++) ctx.lineTo(pts[j][0], pts[j][1]);
+        if (z.polygon.length >= 3) {
+          ctx.closePath();
+          ctx.fillStyle = hexToRgba(z.color, i === activeIdx && drawing ? 0.25 : 0.15);
+          ctx.fill();
+        }
+        ctx.strokeStyle = z.color;
+        ctx.lineWidth = i === activeIdx ? 2.5 : 1.5;
+        ctx.setLineDash(i === activeIdx ? [] : [6, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Vertex dots
+        pts.forEach(([cx, cy]) => {
+          ctx.beginPath();
+          ctx.arc(cx, cy, i === activeIdx ? 5 : 4, 0, Math.PI * 2);
+          ctx.fillStyle = z.color;
+          ctx.fill();
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        });
+
+        // Label
+        if (z.polygon.length >= 1) {
+          const xs = pts.map((p) => p[0]);
+          const ys = pts.map((p) => p[1]);
+          const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+          const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+          ctx.font = "bold 13px sans-serif";
+          ctx.fillStyle = "#fff";
+          ctx.textAlign = "center";
+          ctx.shadowColor = "rgba(0,0,0,0.8)";
+          ctx.shadowBlur = 4;
+          ctx.fillText(z.name, cx, cy);
+          ctx.shadowBlur = 0;
+        }
+      });
+    }
+  }, [zones, activeIdx, drawing, imgSrc, canvasW, canvasH, toCanvas]);
+
+  // Click on canvas → add point
+  function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    if (!drawing) return;
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const [vx, vy] = toVideo(cx, cy);
+    setZones((prev) =>
+      prev.map((z, i) =>
+        i === activeIdx ? { ...z, polygon: [...z.polygon, [vx, vy]] } : z,
+      ),
+    );
+  }
+
+  // Double-click → close polygon & stop drawing
+  function onCanvasDblClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    e.preventDefault();
+    if (!drawing) return;
+    setDrawing(false);
+    setMsg({ ok: true, text: `"${zones[activeIdx].name}" 구역 설정 완료! 저장하려면 [저장] 버튼을 누르세요.` });
+  }
+
+  // Image upload
+  function onImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      setImgNatW(img.naturalWidth);
+      setImgNatH(img.naturalHeight);
+      setImgSrc(url);
+    };
+    img.src = url;
+  }
+
+  // RTSP snapshot
+  async function takeSnapshot() {
+    setSnapshotLoading(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/snapshot");
+      if (!res.ok) {
+        const j = (await res.json()) as { error: string };
+        setMsg({ ok: false, text: j.error ?? "스냅샷 실패" });
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        setImgNatW(img.naturalWidth);
+        setImgNatH(img.naturalHeight);
+        setImgSrc(url);
+      };
+      img.src = url;
+      setMsg({ ok: true, text: "RTSP 스냅샷 불러오기 성공" });
+    } catch {
+      setMsg({ ok: false, text: "스냅샷 API 에러 (Python이 실행 중인지 확인하세요)" });
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }
+
+  // Clear current zone polygon
+  function clearZone(i: number) {
+    setZones((prev) => prev.map((z, idx) => (idx === i ? { ...z, polygon: [] } : z)));
+    setDrawing(false);
+  }
 
   function addZone() {
-    setZones((prev) => [
-      ...prev,
-      { name: `zone_${prev.length + 1}`, motion_active_threshold: 18, polygon: DEFAULT_POLYGON },
-    ]);
+    const newZone: ZoneEntry = {
+      name: `zone_${zones.length + 1}`,
+      motion_active_threshold: 18,
+      polygon: [],
+      color: ZONE_COLORS[zones.length % ZONE_COLORS.length],
+    };
+    setZones((prev) => [...prev, newZone]);
+    setActiveIdx(zones.length);
   }
 
   function removeZone(i: number) {
     if (!confirm("이 구역을 삭제하시겠습니까?")) return;
     setZones((prev) => prev.filter((_, idx) => idx !== i));
+    setActiveIdx(Math.max(0, i - 1));
+    setDrawing(false);
   }
 
-  function updateZone(i: number, patch: Partial<ZoneEntry>) {
-    setZones((prev) => prev.map((z, idx) => (idx === i ? { ...z, ...patch } : z)));
+  function updateZoneName(i: number, name: string) {
+    setZones((prev) => prev.map((z, idx) => (idx === i ? { ...z, name } : z)));
   }
 
+  function updateZoneThr(i: number, thr: number) {
+    setZones((prev) =>
+      prev.map((z, idx) => (idx === i ? { ...z, motion_active_threshold: thr } : z)),
+    );
+  }
+
+  // Save to zones.yaml
   async function save() {
+    const invalid = zones.find((z) => z.polygon.length < 3);
+    if (invalid) {
+      setMsg({ ok: false, text: `"${invalid.name}" 구역의 폴리곤 점이 3개 미만입니다.` });
+      return;
+    }
     setSaving(true);
-    setSaveMsg(null);
+    setMsg(null);
     try {
       const res = await fetch("/api/zones", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ zones }),
+        body: JSON.stringify({
+          zones: zones.map(({ name, motion_active_threshold, polygon }) => ({
+            name,
+            motion_active_threshold,
+            polygon,
+          })),
+        }),
       });
       const j = (await res.json()) as { ok?: boolean; error?: string };
       if (res.ok && j.ok) {
-        setSaveMsg({ ok: true, text: "zones.yaml 저장 완료! Python 수집기를 재시작해야 반영됩니다." });
+        setMsg({ ok: true, text: "✓ zones.yaml 저장 완료! Python 수집기(main.py)를 재시작하면 반영됩니다." });
       } else {
-        setSaveMsg({ ok: false, text: j.error ?? "저장 실패" });
+        setMsg({ ok: false, text: j.error ?? "저장 실패" });
       }
     } catch {
-      setSaveMsg({ ok: false, text: "Network error" });
+      setMsg({ ok: false, text: "저장 중 오류가 발생했습니다." });
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50">
-      <header className="sticky top-0 z-30 border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
+    <div className="min-h-screen bg-zinc-950">
+      {/* Header */}
+      <header className="border-b border-zinc-800 bg-zinc-900">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
           <div>
-            <h1 className="text-base font-semibold text-zinc-950">구역(Zone) 설정</h1>
-            <p className="text-xs text-zinc-500">
-              <code className="rounded bg-zinc-100 px-1">config/zones.yaml</code> 을 직접 편집합니다 (로컬 전용)
+            <h1 className="text-base font-semibold text-white">구역(Zone) 설정</h1>
+            <p className="text-xs text-zinc-400">
+              사진 위를 클릭하여 구역을 지정 · 더블클릭으로 완료 · <kbd className="rounded bg-zinc-700 px-1">Esc</kbd>로 그리기 취소
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="rounded-xl border bg-white px-3 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-50"
-            >
+            <button onClick={() => router.push("/dashboard")} className="rounded-xl border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800">
               ← 대시보드
+            </button>
+            <button
+              onClick={() => void save()}
+              disabled={saving}
+              className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              {saving ? "저장 중…" : "저장"}
             </button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-4xl space-y-4 px-4 py-6">
-        {error ? (
-          <div className="rounded-2xl bg-red-50 p-5 text-sm text-red-700">
-            {error}
-            {error.includes("local dev") && (
-              <p className="mt-1 text-xs">이 기능은 <code>npm run dev</code> 로컬 실행 시에만 사용할 수 있습니다.</p>
-            )}
-          </div>
-        ) : null}
+      <div className="mx-auto flex max-w-7xl gap-4 p-4">
+        {/* Left: canvas */}
+        <div className="flex min-w-0 flex-1 flex-col gap-3">
+          {/* Image toolbar */}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="cursor-pointer rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-700">
+              📂 사진 업로드
+              <input type="file" accept="image/*" className="hidden" onChange={onImageUpload} />
+            </label>
+            <button
+              onClick={() => void takeSnapshot()}
+              disabled={snapshotLoading}
+              className="rounded-xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+            >
+              {snapshotLoading ? "캡처 중…" : "📷 RTSP 스냅샷"}
+            </button>
 
-        {!loading && !error ? (
-          <>
-            {zones.map((z, i) => (
-              <div key={i} className="rounded-3xl border bg-white p-6 shadow-sm">
-                <div className="flex items-start justify-between">
-                  <h2 className="text-sm font-semibold text-zinc-950">구역 {i + 1}</h2>
+            {drawing ? (
+              <span className="rounded-xl bg-blue-600/20 px-3 py-2 text-sm text-blue-300">
+                ✏️ <strong>{zones[activeIdx]?.name}</strong> 그리는 중 — 클릭으로 점 추가, 더블클릭으로 완료
+              </span>
+            ) : null}
+          </div>
+
+          {/* Canvas */}
+          <div
+            ref={containerRef}
+            className="w-full overflow-hidden rounded-2xl border border-zinc-700"
+            style={{ cursor: drawing ? "crosshair" : "default" }}
+          >
+            <canvas
+              ref={canvasRef}
+              width={canvasW}
+              height={canvasH}
+              className="block w-full"
+              onClick={onCanvasClick}
+              onDoubleClick={onCanvasDblClick}
+              onKeyDown={(e) => { if (e.key === "Escape") setDrawing(false); }}
+              tabIndex={0}
+            />
+          </div>
+
+          {msg ? (
+            <div className={["rounded-xl px-4 py-3 text-sm", msg.ok ? "bg-emerald-900/40 text-emerald-300" : "bg-red-900/40 text-red-300"].join(" ")}>
+              {msg.text}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Right: zone list */}
+        <div className="flex w-72 shrink-0 flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold text-white">구역 목록</span>
+            <button onClick={addZone} className="rounded-xl border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-700">
+              + 추가
+            </button>
+          </div>
+
+          {zones.map((z, i) => (
+            <div
+              key={i}
+              className={[
+                "rounded-2xl border p-4 transition-all",
+                i === activeIdx
+                  ? "border-blue-500 bg-zinc-800"
+                  : "border-zinc-700 bg-zinc-900 hover:border-zinc-600",
+              ].join(" ")}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-full" style={{ background: z.color }} />
+                  <span className="text-xs font-semibold text-white">구역 {i + 1}</span>
+                </div>
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => { setActiveIdx(i); setDrawing(false); }}
+                    className="rounded-lg px-2 py-1 text-xs text-zinc-400 hover:text-white"
+                  >
+                    선택
+                  </button>
                   <button
                     onClick={() => removeZone(i)}
-                    className="rounded-xl border px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
+                    className="rounded-lg px-2 py-1 text-xs text-red-500 hover:text-red-300"
                   >
                     삭제
                   </button>
                 </div>
+              </div>
 
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-zinc-700">
-                      구역 ID (zone_name)
-                    </label>
-                    <input
-                      type="text"
-                      value={z.name}
-                      onChange={(e) => updateZone(i, { name: e.target.value })}
-                      placeholder="예: cooking_zone"
-                      className="w-full rounded-xl border px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-zinc-900"
-                    />
-                    <p className="mt-1 text-xs text-zinc-400">
-                      DB의 zone_name과 반드시 일치해야 합니다
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-zinc-700">
-                      활동 임계값 (motion_active_threshold)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      value={z.motion_active_threshold}
-                      onChange={(e) =>
-                        updateZone(i, { motion_active_threshold: parseFloat(e.target.value) || 18 })
-                      }
-                      className="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-900"
-                    />
-                    <p className="mt-1 text-xs text-zinc-400">
-                      이 값 이상의 motion_score = Active로 판정
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-4">
-                  <label className="mb-2 block text-xs font-medium text-zinc-700">
-                    폴리곤 좌표 (픽셀, 1280×720 기준)
-                  </label>
-                  <PolygonEditor
-                    polygon={z.polygon}
-                    onChange={(p) => updateZone(i, { polygon: p })}
+              <div className="mt-3 space-y-2">
+                <div>
+                  <label className="text-xs text-zinc-500">Zone ID (DB와 일치)</label>
+                  <input
+                    type="text"
+                    value={z.name}
+                    onChange={(e) => updateZoneName(i, e.target.value)}
+                    className="mt-0.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white outline-none focus:border-blue-500"
                   />
                 </div>
+                <div>
+                  <label className="text-xs text-zinc-500">활동 임계값</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={z.motion_active_threshold}
+                    onChange={(e) => updateZoneThr(i, parseFloat(e.target.value) || 18)}
+                    className="mt-0.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-white outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => { setActiveIdx(i); setDrawing(true); }}
+                    className={[
+                      "flex-1 rounded-lg py-1.5 text-xs font-semibold",
+                      i === activeIdx && drawing
+                        ? "bg-blue-600 text-white"
+                        : "border border-zinc-600 text-zinc-300 hover:border-blue-500 hover:text-blue-300",
+                    ].join(" ")}
+                  >
+                    {i === activeIdx && drawing ? "✏️ 그리는 중" : "✏️ 그리기"}
+                  </button>
+                  <button
+                    onClick={() => clearZone(i)}
+                    className="rounded-lg border border-zinc-700 px-2 py-1.5 text-xs text-zinc-400 hover:border-red-700 hover:text-red-400"
+                  >
+                    초기화
+                  </button>
+                </div>
+
+                <div className="text-xs text-zinc-500">
+                  {z.polygon.length < 3
+                    ? `점 ${z.polygon.length}개 (최소 3개 필요)`
+                    : `✓ 점 ${z.polygon.length}개`}
+                </div>
               </div>
-            ))}
-
-            <button
-              onClick={addZone}
-              className="w-full rounded-3xl border-2 border-dashed border-zinc-200 py-4 text-sm font-medium text-zinc-500 hover:border-zinc-400 hover:text-zinc-700"
-            >
-              + 새 구역 추가
-            </button>
-
-            {saveMsg ? (
-              <div
-                className={[
-                  "rounded-2xl px-5 py-4 text-sm",
-                  saveMsg.ok ? "bg-emerald-50 text-emerald-800" : "bg-red-50 text-red-800",
-                ].join(" ")}
-              >
-                {saveMsg.text}
-              </div>
-            ) : null}
-
-            <div className="flex justify-end gap-3 pb-10">
-              <button
-                onClick={() => void fetchZones()}
-                className="rounded-xl border bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-              >
-                초기화
-              </button>
-              <button
-                onClick={() => void save()}
-                disabled={saving}
-                className="rounded-xl bg-zinc-900 px-6 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
-              >
-                {saving ? "저장 중…" : "저장 (zones.yaml)"}
-              </button>
             </div>
-          </>
-        ) : loading ? (
-          <div className="rounded-2xl border bg-white p-6 text-sm text-zinc-500">불러오는 중…</div>
-        ) : null}
-      </main>
+          ))}
+
+          {/* Guide */}
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 text-xs text-zinc-500 space-y-1">
+            <p className="font-medium text-zinc-400">사용 방법</p>
+            <p>1. 사진 업로드 또는 RTSP 스냅샷</p>
+            <p>2. 구역을 선택 후 [✏️ 그리기] 클릭</p>
+            <p>3. 화면을 클릭해 꼭짓점 추가</p>
+            <p>4. 더블클릭으로 완료</p>
+            <p>5. 모든 구역 완료 후 [저장] 클릭</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

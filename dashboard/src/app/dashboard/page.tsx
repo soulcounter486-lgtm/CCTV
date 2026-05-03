@@ -156,9 +156,6 @@ export default function KitchenDashboardPage() {
     router.replace("/login");
   }
 
-  const kitchenStill =
-    "https://images.unsplash.com/photo-1556910103-1c02745aae4d?q=80&w=1600&auto=format&fit=crop";
-
   return (
     <div className="min-h-screen bg-zinc-50">
       <ControlBar
@@ -223,7 +220,7 @@ export default function KitchenDashboardPage() {
                 )}
               </div>
               <div className="space-y-6 lg:col-span-2">
-                <ZoneMonitor zones={ZONE_DEFS} live={live} imageUrl={kitchenStill} />
+                <ZoneMonitor zones={ZONE_DEFS} live={live} />
               </div>
             </div>
 
