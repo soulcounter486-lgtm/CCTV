@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Iterator
@@ -12,6 +13,9 @@ class RtspConfig:
     url: str
     reconnect_backoff_seconds: float = 2.0
     buffer_size: int = 1
+    # Passed via ffmpeg-open options string when opening RTSP over FFmpeg backend.
+    rtsp_transport: str = "tcp"  # tcp | udp
+    ffmpeg_read_timeout_ms: int = 60000
 
 
 class RtspStream:
@@ -19,7 +23,18 @@ class RtspStream:
         self._cfg = cfg
         self._cap: cv2.VideoCapture | None = None
 
+    def _apply_ffmpeg_env(self) -> None:
+        # OpenCV FFmpeg backend reads these environment variables when opening the stream.
+        # Reference patterns commonly used with rtsp:// streams:
+        # - rtsp_transport;tcp
+        # - stimeout (microseconds)
+        transport = (self._cfg.rtsp_transport or "tcp").strip().lower()
+        cap_opts = f"rtsp_transport;{transport};stimeout;{int(self._cfg.ffmpeg_read_timeout_ms) * 1000}"
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = cap_opts
+        os.environ["OPENCV_FFMPEG_READ_TIMEOUT"] = str(int(self._cfg.ffmpeg_read_timeout_ms))
+
     def _open(self) -> cv2.VideoCapture:
+        self._apply_ffmpeg_env()
         cap = cv2.VideoCapture(self._cfg.url, cv2.CAP_FFMPEG)
         # Try to reduce latency.
         try:

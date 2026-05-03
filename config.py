@@ -11,6 +11,8 @@ class Config:
     # RTSP
     rtsp_url: str
     reconnect_backoff_seconds: float
+    rtsp_transport: str
+    rtsp_read_timeout_ms: int
 
     # YOLO
     yolo_model: str
@@ -45,6 +47,8 @@ def load_config() -> Config:
     return Config(
         rtsp_url=os.getenv("RTSP_URL", ""),
         reconnect_backoff_seconds=float(os.getenv("RECONNECT_BACKOFF_SECONDS", "2")),
+        rtsp_transport=os.getenv("RTSP_TRANSPORT", "tcp"),
+        rtsp_read_timeout_ms=int(os.getenv("RTSP_READ_TIMEOUT_MS", "60000")),
         yolo_model=os.getenv("YOLO_MODEL", "yolov8n.pt"),
         device=os.getenv("DEVICE", "cpu"),
         conf_thres=float(os.getenv("CONF_THRES", "0.35")),

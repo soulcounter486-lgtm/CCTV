@@ -35,7 +35,14 @@ def main() -> None:
     model = YOLO(c.yolo_model)
     sink = SupabaseSink(SupabaseConfig(url=c.supabase_url, key=c.supabase_key, table=c.supabase_table))
 
-    stream = RtspStream(RtspConfig(url=c.rtsp_url, reconnect_backoff_seconds=c.reconnect_backoff_seconds))
+    stream = RtspStream(
+        RtspConfig(
+            url=c.rtsp_url,
+            reconnect_backoff_seconds=c.reconnect_backoff_seconds,
+            rtsp_transport=c.rtsp_transport,
+            ffmpeg_read_timeout_ms=c.rtsp_read_timeout_ms,
+        )
+    )
 
     zones = load_zones(c.zones_config_path)
     zone_names = [z.name for z in zones]
