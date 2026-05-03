@@ -18,7 +18,7 @@ export function ActivityLogTable({ rows }: { rows: LogRow[] }) {
       <div className="flex items-end justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-zinc-950">활동 로그</div>
-          <div className="text-xs text-zinc-600">구역별 Active/Idle 구간(더미 추정)</div>
+          <div className="text-xs text-zinc-600">구역별 Active/Idle 전환 기록 (Supabase 기반)</div>
         </div>
         <div className="text-xs text-zinc-600">
           최근 <span className="font-semibold text-zinc-950">{rows.length}</span>건
@@ -37,7 +37,14 @@ export function ActivityLogTable({ rows }: { rows: LogRow[] }) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="py-6 text-center text-sm text-zinc-500">
+                  로그 데이터가 없습니다.
+                </td>
+              </tr>
+            ) : null}
+          {rows.map((r) => (
               <tr key={r.id} className="text-zinc-900">
                 <td className="border-b border-zinc-100 py-3 pr-4 font-medium">{r.zoneKo}</td>
                 <td className="border-b border-zinc-100 py-3 pr-4">
@@ -47,7 +54,7 @@ export function ActivityLogTable({ rows }: { rows: LogRow[] }) {
                       r.kind === "active" ? "bg-emerald-50 text-emerald-800" : "bg-zinc-100 text-zinc-700",
                     ].join(" ")}
                   >
-                    {r.kind === "active" ? "Active" : "Idle"}
+                    {r.kind === "active" ? "Working" : "Idle"}
                   </span>
                 </td>
                 <td className="border-b border-zinc-100 py-3 pr-4 tabular-nums text-zinc-700">{fmt(r.start)}</td>

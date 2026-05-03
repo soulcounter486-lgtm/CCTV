@@ -84,14 +84,15 @@ export default function KitchenDashboardPage() {
   }, [day, fetchDay]);
 
   useEffect(() => {
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+    let cancelled = false;
 
     (async () => {
       const { data: sess } = await supabase.auth.getSession();
-      if (!sess.session) return;
+      if (!sess.session || cancelled) return;
 
-      channel = supabase
-        .channel("kitchen_activity_admin_dashboard")
+      const channelName = `ka_dashboard_${Date.now()}`;
+      const ch = supabase
+        .channel(channelName)
         .on(
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "kitchen_activity" },
@@ -100,10 +101,15 @@ export default function KitchenDashboardPage() {
           },
         )
         .subscribe();
-    })();
+
+      return () => {
+        cancelled = true;
+        void supabase.removeChannel(ch);
+      };
+    })().catch(console.error);
 
     return () => {
-      if (channel) supabase.removeChannel(channel);
+      cancelled = true;
     };
   }, [day, fetchDay]);
 
@@ -166,16 +172,22 @@ export default function KitchenDashboardPage() {
         {!loading && !error ? (
           <>
             {!hasRows ? (
-              <div className="rounded-3xl border border-zinc-200 bg-white p-5 text-sm text-zinc-700">
-                선택한 날짜에 저장된 데이터가 없습니다. 파이썬 수집기 실행 및 카메라 RTSP 연결을 확인해주세요.
+              <div className="rounded-3xl border border-zinc-200 bg-white p-6">
+                <div className="text-sm font-semibold text-zinc-950">이 날짜의 데이터가 없습니다</div>
+                <ul className="mt-2 list-disc pl-5 text-xs leading-6 text-zinc-600">
+                  <li><span className="font-medium">파이썬 수집기</span>가 실행 중인지 확인하세요 (<code>python main.py</code>).</li>
+                  <li>카메라 <span className="font-medium">RTSP 연결</span>이 열려 있는지 확인하세요.</li>
+                  <li>1분마다 데이터가 insert 되므로 잠시 후 새로고침해주세요.</li>
+                </ul>
               </div>
             ) : null}
 
             {hasRows && !hasSeries ? (
               <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">
-                데이터는 존재하지만 차트에 매핑된 Zone 이름이 없습니다. DB의{" "}
-                <span className="font-semibold">zone_name</span>이 대시보드 Zone 정의(
-                {ZONE_DEFS.map((z) => z.id).join(", ")})와 일치하는지 확인해주세요.
+                데이터는 있지만 Zone 이름이 일치하지 않습니다.
+                DB의 <span className="font-semibold">zone_name</span>이{" "}
+                <span className="font-semibold">{ZONE_DEFS.map((z) => z.id).join(", ")}</span>
+                과 일치하는지 확인해주세요.
               </div>
             ) : null}
 

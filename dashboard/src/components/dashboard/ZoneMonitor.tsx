@@ -14,10 +14,10 @@ export function ZoneMonitor({
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-zinc-950">구역 모니터링</div>
-          <div className="text-xs text-zinc-600">SVG로 Zone을 겹쳐서 badge를 표시합니다 (정지 이미지는 플레이스홀더).</div>
+          <div className="text-xs text-zinc-600">가장 최근 1분 집계 기준으로 Zone별 상태를 표시합니다.</div>
         </div>
         <div className="rounded-full border bg-zinc-50 px-3 py-1 text-xs text-zinc-700">
-          정지 화면 + 오버레이
+          실시간 갱신
         </div>
       </div>
 
@@ -84,7 +84,7 @@ export function ZoneMonitor({
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-zinc-700">
                     <span className="rounded-full bg-zinc-50 px-2 py-1 font-semibold text-zinc-900">
-                      인원 {c.personCount}
+                      추정 인원 {c.personCount}명
                     </span>
                     <span className="rounded-full bg-zinc-50 px-2 py-1 font-semibold text-zinc-900">
                       motion {c.motion.toFixed(1)}

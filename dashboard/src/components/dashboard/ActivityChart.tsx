@@ -49,7 +49,7 @@ export function ActivityChart({
         <div>
           <div className="text-sm font-semibold text-zinc-950">시간대별 활동 흐름</div>
           <div className="text-xs text-zinc-600">
-            붉은 배경은 <span className="font-medium text-zinc-950">전 구역 Idle</span> 구간
+            붉은 배경: 전 구역 Idle 구간 &nbsp;|&nbsp; 점선: 임계값
           </div>
         </div>
         <div className="text-xs text-zinc-600">
