@@ -6,10 +6,6 @@ import { useRouter } from "next/navigation";
 import {
   IDLE_THRESHOLD,
   ZONE_DEFS,
-  buildActivityLogs,
-  buildDummyDaySamples,
-  findGlobalIdleBands,
-  summarize,
 } from "./dummy";
 import {
   buildDbLogs,
@@ -27,11 +23,6 @@ import { ZoneMonitor } from "@/components/dashboard/ZoneMonitor";
 import { supabase } from "@/lib/supabase/client";
 import type { KitchenActivityRow } from "@/lib/types";
 
-function parseLocalDay(dayStr: string) {
-  const [y, m, d] = dayStr.split("-").map((x) => Number(x));
-  return new Date(y, (m ?? 1) - 1, d ?? 1);
-}
-
 export default function KitchenDashboardPage() {
   const router = useRouter();
 
@@ -46,7 +37,6 @@ export default function KitchenDashboardPage() {
   const [day, setDay] = useState(todayStr);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [useDemo, setUseDemo] = useState(false);
 
   const [rawRows, setRawRows] = useState<KitchenActivityRow[]>([]);
 
@@ -83,7 +73,6 @@ export default function KitchenDashboardPage() {
     }
 
     setRawRows(data ?? []);
-    setUseDemo(!(data ?? []).length);
     setLoading(false);
   }, [router]);
 
@@ -118,22 +107,19 @@ export default function KitchenDashboardPage() {
     };
   }, [day, fetchDay]);
 
-  const demoSamples = useMemo(() => buildDummyDaySamples(parseLocalDay(day)), [day]);
-
-  const realSamples = useMemo(() => rowsToMinuteSamples(rawRows, ZONE_DEFS), [rawRows]);
-
-  const samples = useDemo ? demoSamples : realSamples;
-  const summary = useMemo(() => {
-    return useDemo ? summarize(samples) : summarizeFromSamples(samples, ZONE_DEFS);
-  }, [samples, useDemo]);
+  const samples = useMemo(() => rowsToMinuteSamples(rawRows, ZONE_DEFS), [rawRows]);
+  const summary = useMemo(() => summarizeFromSamples(samples, ZONE_DEFS), [samples]);
 
   const idleBands = useMemo(() => {
-    return useDemo ? findGlobalIdleBands(samples) : findGlobalIdleBandsFromSamples(samples, ZONE_DEFS);
-  }, [samples, useDemo]);
+    return findGlobalIdleBandsFromSamples(samples, ZONE_DEFS);
+  }, [samples]);
 
   const logs = useMemo(() => {
-    return useDemo ? buildActivityLogs(samples) : buildDbLogs(rawRows, ZONE_DEFS);
-  }, [samples, useDemo, rawRows]);
+    return buildDbLogs(rawRows, ZONE_DEFS);
+  }, [rawRows]);
+
+  const hasRows = rawRows.length > 0;
+  const hasSeries = samples.length > 0;
 
   const live = useMemo(() => {
     const last = samples[samples.length - 1];
@@ -164,11 +150,7 @@ export default function KitchenDashboardPage() {
     <div className="min-h-screen bg-zinc-50">
       <ControlBar
         title="주방 활동 관리 대시보드"
-        subtitle={
-          useDemo
-            ? "선택한 날짜에 Supabase 데이터가 없어 데모 데이터를 표시합니다."
-            : "Supabase의 kitchen_activity 데이터를 기반으로 표시합니다."
-        }
+        subtitle={"Supabase의 kitchen_activity 데이터를 기반으로 표시합니다."}
         value={day}
         onChange={setDay}
         idleThreshold={IDLE_THRESHOLD}
@@ -183,9 +165,17 @@ export default function KitchenDashboardPage() {
 
         {!loading && !error ? (
           <>
-            {useDemo ? (
-              <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-                이 날짜에는 아직 수집 데이터가 없습니다. 파이썬 수집기가 실행 중인지/카메라 RTSP가 열리는지 확인해주세요.
+            {!hasRows ? (
+              <div className="rounded-3xl border border-zinc-200 bg-white p-5 text-sm text-zinc-700">
+                선택한 날짜에 저장된 데이터가 없습니다. 파이썬 수집기 실행 및 카메라 RTSP 연결을 확인해주세요.
+              </div>
+            ) : null}
+
+            {hasRows && !hasSeries ? (
+              <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">
+                데이터는 존재하지만 차트에 매핑된 Zone 이름이 없습니다. DB의{" "}
+                <span className="font-semibold">zone_name</span>이 대시보드 Zone 정의(
+                {ZONE_DEFS.map((z) => z.id).join(", ")})와 일치하는지 확인해주세요.
               </div>
             ) : null}
 
@@ -198,12 +188,18 @@ export default function KitchenDashboardPage() {
 
             <div className="grid gap-6 lg:grid-cols-5">
               <div className="space-y-6 lg:col-span-3">
-                <ActivityChart
-                  samples={samples}
-                  zones={ZONE_DEFS}
-                  idleBands={idleBands}
-                  idleThreshold={IDLE_THRESHOLD}
-                />
+                {hasSeries ? (
+                  <ActivityChart
+                    samples={samples}
+                    zones={ZONE_DEFS}
+                    idleBands={idleBands}
+                    idleThreshold={IDLE_THRESHOLD}
+                  />
+                ) : (
+                  <div className="rounded-3xl border bg-white p-8 text-sm text-zinc-600">
+                    표시할 시계열 데이터가 없습니다.
+                  </div>
+                )}
               </div>
               <div className="space-y-6 lg:col-span-2">
                 <ZoneMonitor zones={ZONE_DEFS} live={live} imageUrl={kitchenStill} />
