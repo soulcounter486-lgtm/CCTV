@@ -13,6 +13,11 @@ dashboard/.env.local
 dashboard/.env.local.*
 !dashboard/.env.local.example
 
+# Large ML weights (download locally)
+*.pt
+*.onnx
+*.engine
+
 # Node / Next
 node_modules/
 npm-debug.log*
