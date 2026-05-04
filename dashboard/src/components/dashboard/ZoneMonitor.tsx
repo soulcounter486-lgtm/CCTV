@@ -5,8 +5,17 @@ import type { ZoneDef } from "@/app/dashboard/dummy";
 
 const STREAM_URL = process.env.NEXT_PUBLIC_STREAM_URL ?? "";
 
+/**
+ * Optional explicit stream server status endpoint (recommended on HTTPS deployments).
+ *
+ * Example:
+ *   NEXT_PUBLIC_STREAM_URL=http://14.237.71.208:8090/stream
+ *   NEXT_PUBLIC_STREAM_STATUS_URL=http://14.237.71.208:8090/status
+ */
+const STATUS_URL = process.env.NEXT_PUBLIC_STREAM_STATUS_URL ?? "";
+
 // Derive base URL for /status endpoint (same origin as the stream)
-function getStatusUrl(streamUrl: string): string {
+function getStatusUrlFromStream(streamUrl: string): string {
   try {
     const u = new URL(streamUrl);
     return `${u.protocol}//${u.host}/status`;
@@ -15,7 +24,8 @@ function getStatusUrl(streamUrl: string): string {
   }
 }
 
-const STATUS_URL = getStatusUrl(STREAM_URL);
+const STATUS_URL_DERIVED = getStatusUrlFromStream(STREAM_URL);
+const RESOLVED_STATUS_URL = STATUS_URL || STATUS_URL_DERIVED;
 
 export function ZoneMonitor({
   zones,
@@ -25,24 +35,30 @@ export function ZoneMonitor({
   live: Record<string, { personCount: number; active: boolean; motion: number }>;
 }) {
   const [rtspConnected, setRtspConnected] = useState<boolean | null>(null); // null = unknown
+  const [statusOk, setStatusOk] = useState<boolean | null>(null); // can we call /status?
   const [streamError, setStreamError] = useState(false);
   const [showLive, setShowLive] = useState(true);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll /status every 3 seconds to know if RTSP camera is connected
+  // Best-effort: poll /status to know if RTSP is connected. This can fail on HTTPS due to
+  // mixed content / CORS, so the UI must not treat failures as "server offline".
   useEffect(() => {
-    if (!STATUS_URL) return;
+    if (!RESOLVED_STATUS_URL) return;
 
     const poll = async () => {
       try {
-        const res = await fetch(STATUS_URL, { signal: AbortSignal.timeout(2000) });
+        const res = await fetch(RESOLVED_STATUS_URL, { signal: AbortSignal.timeout(2000) });
         if (res.ok) {
+          setStatusOk(true);
           const data: { connected: boolean } = await res.json();
           setRtspConnected(data.connected);
           if (data.connected) setStreamError(false);
+        } else {
+          setStatusOk(false);
         }
       } catch {
-        // stream server not running
+        // Common on Vercel (https) if status URL is http:// (mixed content) or blocked.
+        setStatusOk(false);
         setRtspConnected(null);
       }
     };
@@ -54,28 +70,36 @@ export function ZoneMonitor({
     };
   }, []);
 
-  const streamServerRunning = rtspConnected !== null; // null = server not reachable
-  const streamLive = streamServerRunning && rtspConnected && !streamError && showLive;
+  // If we can read /status, use it. Otherwise, assume server is "reachable" and rely on <img> load.
+  const streamServerRunning = statusOk === true ? true : !streamError;
+  const streamLive = streamServerRunning && (rtspConnected !== false) && !streamError && showLive;
   const streamActive = !!STREAM_URL && !streamError && showLive; // img is shown
 
   // Badge label
   let badgeLabel = "정지";
   let badgeDot = "bg-zinc-400";
   let badgeCls = "bg-zinc-100 text-zinc-600";
-  if (STREAM_URL && showLive && streamServerRunning) {
-    if (rtspConnected) {
-      badgeLabel = "라이브";
-      badgeDot = "bg-emerald-500 animate-pulse";
-      badgeCls = "bg-emerald-50 text-emerald-700";
+  if (STREAM_URL && showLive) {
+    if (streamError) {
+      badgeLabel = "스트림 실패";
+      badgeDot = "bg-red-400";
+      badgeCls = "bg-red-50 text-red-700";
+    } else if (statusOk === true) {
+      if (rtspConnected) {
+        badgeLabel = "라이브";
+        badgeDot = "bg-emerald-500 animate-pulse";
+        badgeCls = "bg-emerald-50 text-emerald-700";
+      } else {
+        badgeLabel = "카메라 재연결 중";
+        badgeDot = "bg-amber-400 animate-pulse";
+        badgeCls = "bg-amber-50 text-amber-700";
+      }
     } else {
-      badgeLabel = "카메라 재연결 중";
-      badgeDot = "bg-amber-400 animate-pulse";
-      badgeCls = "bg-amber-50 text-amber-700";
+      // status endpoint not usable (or unknown) — show neutral "라이브(확인중)"
+      badgeLabel = "라이브(확인중)";
+      badgeDot = "bg-sky-400 animate-pulse";
+      badgeCls = "bg-sky-50 text-sky-800";
     }
-  } else if (STREAM_URL && showLive && !streamServerRunning) {
-    badgeLabel = "서버 오프라인";
-    badgeDot = "bg-red-400";
-    badgeCls = "bg-red-50 text-red-700";
   }
 
   return (
@@ -167,15 +191,17 @@ export function ZoneMonitor({
           <div className="flex h-44 items-center justify-center text-xs text-zinc-500">
             영상 일시 정지 — 버튼을 눌러 다시 시작
           </div>
-        ) : !streamServerRunning ? (
-          /* Stream server not reachable */
+        ) : streamError ? (
+          /* Stream URL configured but <img> failed to load */
           <div className="flex h-44 flex-col items-center justify-center gap-2 text-center px-4">
-            <div className="text-2xl">🔌</div>
-            <div className="text-xs font-semibold text-zinc-400">스트림 서버 오프라인</div>
-            <code className="mt-1 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-300">
-              python stream_server.py
+            <div className="text-2xl">⚠️</div>
+            <div className="text-xs font-semibold text-zinc-400">스트림 연결 실패</div>
+            <div className="text-xs text-zinc-600">
+              Vercel(https)에서는 <code className="text-zinc-400">http://</code> 스트림이 브라우저에서 차단될 수 있습니다.
+            </div>
+            <code className="mt-1 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-300 break-all">
+              {STREAM_URL}
             </code>
-            <div className="text-xs text-zinc-600">명령어 실행 후 자동으로 연결됩니다</div>
           </div>
         ) : (
           /* Stream server running — show img (may be live or offline placeholder) */
@@ -187,11 +213,12 @@ export function ZoneMonitor({
               alt="Live RTSP stream"
               className="h-auto w-full object-cover"
               style={{ maxHeight: 360, display: "block" }}
+              onLoad={() => setStreamError(false)}
               onError={() => setStreamError(true)}
             />
 
             {/* RTSP offline overlay badge */}
-            {!rtspConnected && (
+            {statusOk === true && !rtspConnected && (
               <div className="absolute top-2 left-2 flex items-center gap-1.5 rounded-full bg-black/70 px-3 py-1">
                 <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
                 <span className="text-xs font-semibold text-amber-300">카메라 재연결 중…</span>
